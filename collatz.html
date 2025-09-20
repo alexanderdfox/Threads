@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collatz Conjecture Visualization Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="collatz.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="header-content">
+                <h1><i class="fas fa-calculator"></i> Collatz Conjecture Visualization Dashboard</h1>
+                <p>Real-time exploration of the 3n+1 problem with infinite threading patterns</p>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <div class="control-panel">
+                <div class="control-group">
+                    <h3><i class="fas fa-cogs"></i> Controls</h3>
+                    <div class="button-group">
+                        <button id="startBtn" class="btn btn-primary">
+                            <i class="fas fa-play"></i> Start
+                        </button>
+                        <button id="pauseBtn" class="btn btn-secondary" disabled>
+                            <i class="fas fa-pause"></i> Pause
+                        </button>
+                        <button id="resetBtn" class="btn btn-danger">
+                            <i class="fas fa-refresh"></i> Reset
+                        </button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3><i class="fas fa-sliders-h"></i> Settings</h3>
+                    <div class="setting">
+                        <label for="speedSlider">Speed (ms):</label>
+                        <input type="range" id="speedSlider" min="100" max="2000" value="500" step="100">
+                        <span id="speedValue">500</span>
+                    </div>
+                    <div class="setting">
+                        <label for="maxNumber">Max Number:</label>
+                        <input type="number" id="maxNumber" min="1" max="10000" value="1000">
+                    </div>
+                    <div class="setting">
+                        <label for="maxDepth">Max Thread Depth:</label>
+                        <input type="number" id="maxDepth" min="0" max="10" value="3">
+                    </div>
+                    <div class="setting">
+                        <label for="showSequences">Show Full Sequences:</label>
+                        <input type="checkbox" id="showSequences" checked>
+                    </div>
+                    
+                    <div class="setting">
+                        <div class="collatz-info">
+                            <i class="fas fa-info-circle"></i>
+                            <strong>Collatz Rules:</strong><br>
+                            • If n is even: n ÷ 2<br>
+                            • If n is odd: 3n + 1<br>
+                            • Continue until n = 1
+                        </div>
+                    </div>
+                </div>
+
+                <div class="stats-panel">
+                    <h3><i class="fas fa-chart-bar"></i> Statistics</h3>
+                    <div class="stat-item">
+                        <span class="stat-label">Active Calculations:</span>
+                        <span id="activeCalculations" class="stat-value">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Numbers Tested:</span>
+                        <span id="numbersTested" class="stat-value">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Longest Sequence:</span>
+                        <span id="longestSequence" class="stat-value">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Highest Peak:</span>
+                        <span id="highestPeak" class="stat-value">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Current Number:</span>
+                        <span id="currentNumber" class="stat-value">1</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Runtime:</span>
+                        <span id="runtime" class="stat-value">00:00</span>
+                    </div>
+                </div>
+
+                <div class="records-panel">
+                    <h3><i class="fas fa-trophy"></i> Records</h3>
+                    <div class="record-item">
+                        <span class="record-label">Most Steps:</span>
+                        <span id="recordSteps" class="record-value">-</span>
+                    </div>
+                    <div class="record-item">
+                        <span class="record-label">Highest Number:</span>
+                        <span id="recordPeak" class="record-value">-</span>
+                    </div>
+                    <div class="record-item">
+                        <span class="record-label">Fastest to 1:</span>
+                        <span id="recordFastest" class="record-value">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="visualization-area">
+                <div class="visualization-header">
+                    <h3><i class="fas fa-project-diagram"></i> Collatz Sequence Visualization</h3>
+                    <div class="view-controls">
+                        <button id="treeViewBtn" class="view-btn active">Tree View</button>
+                        <button id="graphViewBtn" class="view-btn">Graph View</button>
+                        <button id="logViewBtn" class="view-btn">Log View</button>
+                    </div>
+                </div>
+
+                <div id="treeView" class="tree-container">
+                    <div class="tree-legend">
+                        <div class="legend-item">
+                            <div class="legend-color sequence-short"></div>
+                            <span>Short Sequences (≤10 steps)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color sequence-medium"></div>
+                            <span>Medium Sequences (11-50 steps)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color sequence-long"></div>
+                            <span>Long Sequences (51-100 steps)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color sequence-extreme"></div>
+                            <span>Extreme Sequences (>100 steps)</span>
+                        </div>
+                    </div>
+                    <div id="collatzTree" class="collatz-tree"></div>
+                </div>
+
+                <div id="graphView" class="graph-container" style="display: none;">
+                    <div class="graph-controls">
+                        <button id="clearGraphBtn" class="btn btn-small">
+                            <i class="fas fa-trash"></i> Clear Graph
+                        </button>
+                        <button id="exportGraphBtn" class="btn btn-small">
+                            <i class="fas fa-download"></i> Export Data
+                        </button>
+                    </div>
+                    <canvas id="collatzGraph" width="800" height="400"></canvas>
+                    <div class="graph-info">
+                        <p>X-axis: Starting Number | Y-axis: Sequence Length (Steps to reach 1)</p>
+                    </div>
+                </div>
+
+                <div id="logView" class="log-container" style="display: none;">
+                    <div class="log-header">
+                        <button id="clearLogBtn" class="btn btn-small">
+                            <i class="fas fa-trash"></i> Clear Log
+                        </button>
+                        <button id="autoScrollBtn" class="btn btn-small btn-toggle active">
+                            <i class="fas fa-arrow-down"></i> Auto Scroll
+                        </button>
+                        <button id="exportLogBtn" class="btn btn-small">
+                            <i class="fas fa-download"></i> Export Log
+                        </button>
+                    </div>
+                    <div id="collatzLog" class="collatz-log"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Collatz Conjecture Visualization - Exploring the 3n+1 problem through threaded computation</p>
+        </div>
+    </div>
+
+    <script src="collatz.js"></script>
+</body>
+</html>
