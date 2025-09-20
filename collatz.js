@@ -20,14 +20,14 @@ class CollatzSimulator {
         
         // Settings
         this.speed = 500;
-        this.maxNumber = 1000;
-        this.maxDepth = 3;
+        this.maxNumber = Infinity; // Infinite number exploration
+        this.maxDepth = Infinity; // Infinite thread depth
         this.showSequences = true;
         
-        // Performance settings
-        this.maxVisualizationNodes = 150;
-        this.maxLogEntries = 300;
-        this.cleanupInterval = 10000;
+        // Performance settings for infinite mode
+        this.maxVisualizationNodes = 200;
+        this.maxLogEntries = 500;
+        this.cleanupInterval = 5000; // More frequent cleanup for infinite mode
         
         // Graph data
         this.graphData = [];
@@ -100,11 +100,13 @@ class CollatzSimulator {
         });
         
         this.maxNumberInput.addEventListener('change', (e) => {
-            this.maxNumber = parseInt(e.target.value);
+            const value = parseInt(e.target.value);
+            this.maxNumber = value === 0 ? Infinity : value;
         });
         
         this.maxDepthInput.addEventListener('change', (e) => {
-            this.maxDepth = parseInt(e.target.value);
+            const value = parseInt(e.target.value);
+            this.maxDepth = value === 0 ? Infinity : value;
         });
         
         this.showSequencesInput.addEventListener('change', (e) => {
@@ -165,7 +167,7 @@ class CollatzSimulator {
         // Start main calculation loop
         this.createMainCalculationLoop();
         
-        this.log(`Collatz exploration started - Max Number: ${this.maxNumber}, Max Depth: ${this.maxDepth}`, 'SYSTEM', 0);
+        this.log(`Collatz exploration started - Infinite Mode (Max Number: ${this.maxNumber === Infinity ? '∞' : this.maxNumber}, Max Depth: ${this.maxDepth === Infinity ? '∞' : this.maxDepth})`, 'SYSTEM', 0);
     }
     
     pause() {
@@ -228,9 +230,9 @@ class CollatzSimulator {
     }
     
     createMainCalculationLoop() {
-        if (!this.isRunning || this.currentNumber > this.maxNumber) return;
+        if (!this.isRunning) return;
         
-        // Create calculation for current number
+        // Always create new calculations (infinite mode)
         this.createCollatzCalculation(this.currentNumber, `Collatz-${this.currentNumber}`, 0);
         this.currentNumber++;
         
@@ -270,8 +272,8 @@ class CollatzSimulator {
         this.updateStats();
         this.updateGraph();
         
-        // Create child calculations if within depth limit
-        if (depth < this.maxDepth && this.isRunning) {
+        // Create child calculations (infinite depth mode)
+        if (this.isRunning) {
             calculation.timeout = setTimeout(() => {
                 if (this.isRunning && this.calculations.has(calcId)) {
                     // Create related calculations based on Collatz results
@@ -283,11 +285,6 @@ class CollatzSimulator {
                     }, this.speed * 2);
                 }
             }, this.speed + Math.random() * this.speed);
-        } else {
-            // Remove calculation after some time
-            calculation.timeout = setTimeout(() => {
-                this.removeCalculation(calcId);
-            }, this.speed * 3);
         }
     }
     
@@ -299,20 +296,16 @@ class CollatzSimulator {
         // Strategy 1: If long sequence, try nearby numbers
         if (result.steps > 20) {
             const nearbyNumber = number + Math.floor(Math.random() * 10) + 1;
-            if (nearbyNumber <= this.maxNumber) {
-                this.createCollatzCalculation(nearbyNumber, parentCalc.name + '*', depth + 1);
-            }
+            this.createCollatzCalculation(nearbyNumber, parentCalc.name + '*', depth + 1);
         }
         
         // Strategy 2: If high peak, try doubling
-        if (result.maxValue > number * 10 && number * 2 <= this.maxNumber) {
+        if (result.maxValue > number * 10) {
             this.createCollatzCalculation(number * 2, parentCalc.name + '**', depth + 1);
         }
         
-        // Strategy 3: Try next sequential number
-        if (number + 1 <= this.maxNumber) {
-            this.createCollatzCalculation(number + 1, parentCalc.name + '***', depth + 1);
-        }
+        // Strategy 3: Always try next sequential number (infinite exploration)
+        this.createCollatzCalculation(number + 1, parentCalc.name + '***', depth + 1);
     }
     
     updateRecords(number, result) {
@@ -356,7 +349,8 @@ class CollatzSimulator {
         const calculationsToRemove = [];
         
         this.calculations.forEach((calc, id) => {
-            if (now - calc.createdAt > 30000) {
+            // Clean up calculations older than 20 seconds in infinite mode
+            if (now - calc.createdAt > 20000) {
                 calculationsToRemove.push(id);
             }
         });
@@ -580,6 +574,17 @@ Collatz Calculation Details:
         this.longestSequenceSpan.textContent = this.longestSequence;
         this.highestPeakSpan.textContent = this.highestPeak;
         this.currentNumberSpan.textContent = this.currentNumber;
+        
+        // Update settings display with infinity symbols
+        if (this.maxNumberInput) {
+            const numberDisplay = this.maxNumberInput.value === '0' ? '∞' : this.maxNumberInput.value;
+            this.maxNumberInput.setAttribute('title', `Current: ${numberDisplay}`);
+        }
+        
+        if (this.maxDepthInput) {
+            const depthDisplay = this.maxDepthInput.value === '0' ? '∞' : this.maxDepthInput.value;
+            this.maxDepthInput.setAttribute('title', `Current: ${depthDisplay}`);
+        }
         
         // Update records
         this.recordStepsSpan.textContent = this.records.mostSteps.steps > 0 ? 

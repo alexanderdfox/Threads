@@ -14,7 +14,7 @@
         <header class="header">
             <div class="header-content">
                 <h1><i class="fas fa-calculator"></i> Collatz Conjecture Visualization Dashboard</h1>
-                <p>Real-time exploration of the 3n+1 problem with infinite threading patterns</p>
+                <p>Real-time exploration of the 3n+1 problem with infinite threading patterns and unlimited depth</p>
             </div>
         </header>
 
@@ -43,12 +43,12 @@
                         <span id="speedValue">500</span>
                     </div>
                     <div class="setting">
-                        <label for="maxNumber">Max Number:</label>
-                        <input type="number" id="maxNumber" min="1" max="10000" value="1000">
+                        <label for="maxNumber">Max Number (0 = ∞):</label>
+                        <input type="number" id="maxNumber" min="0" max="100000" value="0" placeholder="0 for infinite">
                     </div>
                     <div class="setting">
-                        <label for="maxDepth">Max Thread Depth:</label>
-                        <input type="number" id="maxDepth" min="0" max="10" value="3">
+                        <label for="maxDepth">Max Thread Depth (0 = ∞):</label>
+                        <input type="number" id="maxDepth" min="0" max="50" value="0" placeholder="0 for infinite">
                     </div>
                     <div class="setting">
                         <label for="showSequences">Show Full Sequences:</label>
@@ -62,6 +62,13 @@
                             • If n is even: n ÷ 2<br>
                             • If n is odd: 3n + 1<br>
                             • Continue until n = 1
+                        </div>
+                    </div>
+                    
+                    <div class="setting">
+                        <div class="infinite-warning">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            <strong>Infinite Mode Active:</strong> Calculations will grow exponentially. Each number spawns multiple child calculations!
                         </div>
                     </div>
                 </div>
