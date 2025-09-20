@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thread Visualization Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="header-content">
+                <h1><i class="fas fa-project-diagram"></i> Thread Visualization Dashboard</h1>
+                <p>Real-time visualization of recursive threading patterns with infinite depth and threads</p>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <div class="control-panel">
+                <div class="control-group">
+                    <h3><i class="fas fa-cogs"></i> Controls</h3>
+                    <div class="button-group">
+                        <button id="startBtn" class="btn btn-primary">
+                            <i class="fas fa-play"></i> Start
+                        </button>
+                        <button id="pauseBtn" class="btn btn-secondary" disabled>
+                            <i class="fas fa-pause"></i> Pause
+                        </button>
+                        <button id="resetBtn" class="btn btn-danger">
+                            <i class="fas fa-refresh"></i> Reset
+                        </button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3><i class="fas fa-sliders-h"></i> Settings</h3>
+                    <div class="setting">
+                        <label for="speedSlider">Speed (ms):</label>
+                        <input type="range" id="speedSlider" min="100" max="2000" value="500" step="100">
+                        <span id="speedValue">500</span>
+                    </div>
+                    <div class="setting">
+                        <label for="maxDepth">Max Depth (0 = ∞):</label>
+                        <input type="number" id="maxDepth" min="0" max="50" value="0" placeholder="0 for infinite">
+                    </div>
+                    <div class="setting">
+                        <label for="maxThreads">Max Threads (0 = ∞):</label>
+                        <input type="number" id="maxThreads" min="0" max="10000" value="0" placeholder="0 for infinite">
+                    </div>
+                    
+                    <div class="setting">
+                        <div class="infinite-warning">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            <strong>Infinite Mode Active:</strong> Threads will grow exponentially. Use with caution!
+                        </div>
+                    </div>
+                </div>
+
+                <div class="stats-panel">
+                    <h3><i class="fas fa-chart-bar"></i> Statistics</h3>
+                    <div class="stat-item">
+                        <span class="stat-label">Active Threads:</span>
+                        <span id="activeThreads" class="stat-value">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Total Created:</span>
+                        <span id="totalThreads" class="stat-value">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Max Depth Reached:</span>
+                        <span id="maxDepthReached" class="stat-value">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Runtime:</span>
+                        <span id="runtime" class="stat-value">00:00</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="visualization-area">
+                <div class="visualization-header">
+                    <h3><i class="fas fa-sitemap"></i> Thread Tree Visualization</h3>
+                    <div class="view-controls">
+                        <button id="treeViewBtn" class="view-btn active">Tree View</button>
+                        <button id="logViewBtn" class="view-btn">Log View</button>
+                    </div>
+                </div>
+
+                <div id="treeView" class="tree-container">
+                    <div class="tree-legend">
+                        <div class="legend-item">
+                            <div class="legend-color depth-0"></div>
+                            <span>Root Threads</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color depth-1"></div>
+                            <span>Depth 1</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color depth-2"></div>
+                            <span>Depth 2</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color depth-3"></div>
+                            <span>Depth 3+</span>
+                        </div>
+                    </div>
+                    <div id="threadTree" class="thread-tree"></div>
+                </div>
+
+                <div id="logView" class="log-container" style="display: none;">
+                    <div class="log-header">
+                        <button id="clearLogBtn" class="btn btn-small">
+                            <i class="fas fa-trash"></i> Clear Log
+                        </button>
+                        <button id="autoScrollBtn" class="btn btn-small btn-toggle active">
+                            <i class="fas fa-arrow-down"></i> Auto Scroll
+                        </button>
+                    </div>
+                    <div id="threadLog" class="thread-log"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Thread Visualization Dashboard - Simulating recursive threading patterns</p>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
+
