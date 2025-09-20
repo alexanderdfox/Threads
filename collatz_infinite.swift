@@ -2,6 +2,8 @@ import Foundation
 import Dispatch
 
 var i = 1
+var mostStepsRecord = (number: 0, steps: 0)
+let recordLock = NSLock()
 
 func collatzSequence(n: Int) -> [Int] {
     var sequence = [n]
@@ -24,7 +26,13 @@ func collatzThread(number: Int, threadName: String, depth: Int = 0) {
     let steps = sequence.count - 1
     let maxValue = sequence.max() ?? number
     
-    print("Thread \(threadName) | Number: \(number) | Steps: \(steps) | Max: \(maxValue) | Depth: \(depth)")
+    // Check if this is a new record for most steps
+    recordLock.lock()
+    if steps > mostStepsRecord.steps {
+        mostStepsRecord = (number: number, steps: steps)
+        print("Most Steps: \(number) (\(steps) steps)")
+    }
+    recordLock.unlock()
     
     // Create child threads that explore related Collatz numbers
     let childThread = Thread {
@@ -48,7 +56,7 @@ func collatzThread(number: Int, threadName: String, depth: Int = 0) {
 
 // Start initial threads for infinite Collatz exploration
 print("🚀 Starting infinite Collatz conjecture exploration...")
-print("Each thread spawns child threads exploring related numbers")
+print("Only printing new records for most steps to reach 1")
 print("Press Ctrl+C to stop")
 
 while true {
