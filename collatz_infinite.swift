@@ -393,15 +393,6 @@ class HybridInfiniteCollatzExplorer {
         let totalTime = CFAbsoluteTimeGetCurrent() - startTime
         let rate = Double(count) / totalTime
         
-        // Show sample of results with current numbers and steps
-        let sampleResults = results.prefix(5)
-        for result in sampleResults {
-            print("   → \(result.originalNumber): \(result.steps) steps")
-        }
-        if results.count > 5 {
-            print("   ... and \(results.count - 5) more")
-        }
-        
         print("   Batch completed in \(String(format: "%.3f", totalTime))s (\(String(format: "%.0f", rate))/sec)")
         
         return results
@@ -559,11 +550,7 @@ class HybridInfiniteCollatzExplorer {
         defer { recordLock.unlock() }
         
         for result in results {
-            // Print current number and steps for interesting results
-            if result.steps > 50 || result.maxValue > result.originalNumber * 100 {
-                print("📊 Number: \(result.originalNumber) → \(result.steps) steps (peak: \(result.maxValue))")
-            }
-            
+            // Only print new records
             if result.steps > mostStepsRecord.steps {
                 mostStepsRecord = (number: result.originalNumber, steps: result.steps)
                 print("🏆 NEW RECORD! Number: \(result.originalNumber) took \(result.steps) steps (max value: \(result.maxValue))")
@@ -731,16 +718,6 @@ class CPUInfiniteCollatzExplorer {
             let semaphore = DispatchSemaphore(value: 0)
             
              gcdProcessor.processNumbers(numbers) { [weak self] results in
-                 // Show current numbers being processed
-                 let range = "\(numbers.first ?? 0)-\(numbers.last ?? 0)"
-                 print("🧵 Processed batch \(range) with GCD+SIMD")
-                 
-                 // Show interesting results
-                 let interestingResults = results.filter { $0.steps > 30 }
-                 for result in interestingResults.prefix(3) {
-                     print("   → \(result.originalNumber): \(result.steps) steps (peak: \(result.maxValue))")
-                 }
-                 
                  self?.updateRecords(results)
                  self?.totalProcessed += UInt64(results.count)
                  
