@@ -288,6 +288,29 @@ body {
     background-clip: text;
 }
 
+/* Acceleration type indicators */
+.stat-value.gpu-accelerated {
+    background: linear-gradient(135deg, #10b981, #34d399);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 800;
+    animation: pulse-gpu 2s infinite;
+}
+
+.stat-value.cpu-accelerated {
+    background: linear-gradient(135deg, #f59e0b, #fbbf24);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 700;
+}
+
+@keyframes pulse-gpu {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
 /* Visualization area */
 .visualization-area {
     background: rgba(255, 255, 255, 0.95);

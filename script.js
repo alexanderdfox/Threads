@@ -10,6 +10,14 @@ class ThreadSimulator {
         this.mainInterval = null;
         this.cleanupIntervalId = null;
         
+        // GPU acceleration
+        this.gpuAccelerated = false;
+        this.gl = null;
+        this.computeShader = null;
+        this.workers = [];
+        this.batchSize = 1024;
+        this.processingQueue = [];
+        
         // Settings
         this.speed = 500;
         this.maxDepth = Infinity; // Infinite depth
@@ -23,6 +31,7 @@ class ThreadSimulator {
         // UI elements
         this.initializeElements();
         this.setupEventListeners();
+        this.initializeGPU();
         this.updateStats();
         this.currentView = 'tree';
     }
@@ -40,9 +49,11 @@ class ThreadSimulator {
         this.maxThreadsInput = document.getElementById('maxThreads');
         
         // Stats
+        this.accelerationTypeSpan = document.getElementById('accelerationType');
         this.activeThreadsSpan = document.getElementById('activeThreads');
         this.totalThreadsSpan = document.getElementById('totalThreads');
         this.maxDepthReachedSpan = document.getElementById('maxDepthReached');
+        this.processingRateSpan = document.getElementById('processingRate');
         this.runtimeSpan = document.getElementById('runtime');
         
         // Visualization
@@ -89,6 +100,254 @@ class ThreadSimulator {
         this.autoScrollBtn.addEventListener('click', () => this.toggleAutoScroll());
     }
     
+    initializeGPU() {
+        try {
+            // Create a canvas for WebGL compute
+            const canvas = document.createElement('canvas');
+            canvas.width = 1;
+            canvas.height = 1;
+            this.gl = canvas.getContext('webgl2-compute', {antialias: false});
+            
+            if (!this.gl) {
+                console.log('WebGL2 Compute not supported, falling back to Web Workers');
+                this.initializeWorkers();
+                return;
+            }
+            
+            // Create compute shader for parallel thread processing
+            const computeShaderSource = `#version 310 es
+                layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+                
+                layout(std430, binding = 0) restrict readonly buffer InputBuffer {
+                    uint inputData[];
+                };
+                
+                layout(std430, binding = 1) restrict writeonly buffer OutputBuffer {
+                    uint outputData[];
+                };
+                
+                uint processThread(uint threadId, uint depth) {
+                    // Simulate thread processing with mathematical operations
+                    uint result = threadId;
+                    
+                    // Apply transformations based on depth
+                    for (uint i = 0u; i < depth && i < 10u; i++) {
+                        if (result % 2u == 0u) {
+                            result = result / 2u;
+                        } else {
+                            result = result * 3u + 1u;
+                        }
+                        
+                        // Prevent overflow
+                        if (result > 1000000u) break;
+                    }
+                    
+                    return result;
+                }
+                
+                void main() {
+                    uint index = gl_GlobalInvocationID.x;
+                    if (index >= inputData.length()) return;
+                    
+                    uint threadId = inputData[index * 2u];
+                    uint depth = inputData[index * 2u + 1u];
+                    
+                    uint result = processThread(threadId, depth);
+                    outputData[index] = result;
+                }
+            `;
+            
+            this.computeShader = this.createComputeShader(computeShaderSource);
+            if (this.computeShader) {
+                this.gpuAccelerated = true;
+                console.log('🚀 GPU acceleration enabled for thread processing!');
+                this.updateAccelerationType();
+            } else {
+                this.initializeWorkers();
+            }
+            
+        } catch (error) {
+            console.log('GPU initialization failed, using Web Workers:', error);
+            this.initializeWorkers();
+        }
+    }
+    
+    createComputeShader(source) {
+        if (!this.gl) return null;
+        
+        const shader = this.gl.createShader(this.gl.COMPUTE_SHADER);
+        this.gl.shaderSource(shader, source);
+        this.gl.compileShader(shader);
+        
+        if (!this.gl.getShaderParameter(shader, this.gl.COMPILE_STATUS)) {
+            console.error('Compute shader compilation failed:', this.gl.getShaderInfoLog(shader));
+            return null;
+        }
+        
+        const program = this.gl.createProgram();
+        this.gl.attachShader(program, shader);
+        this.gl.linkProgram(program);
+        
+        if (!this.gl.getProgramParameter(program, this.gl.LINK_STATUS)) {
+            console.error('Compute shader program linking failed:', this.gl.getProgramInfoLog(program));
+            return null;
+        }
+        
+        return program;
+    }
+    
+    initializeWorkers() {
+        const numWorkers = navigator.hardwareConcurrency || 4;
+        
+        for (let i = 0; i < numWorkers; i++) {
+            const workerCode = `
+                self.onmessage = function(e) {
+                    const { threadData, batchId } = e.data;
+                    const results = [];
+                    
+                    for (const thread of threadData) {
+                        // Simulate complex thread processing
+                        let result = thread.id;
+                        const depth = thread.depth;
+                        
+                        // Apply transformations
+                        for (let i = 0; i < depth && i < 10; i++) {
+                            if (result % 2 === 0) {
+                                result = result / 2;
+                            } else {
+                                result = result * 3 + 1;
+                            }
+                            if (result > 1000000) break;
+                        }
+                        
+                        results.push({
+                            originalId: thread.id,
+                            depth: depth,
+                            result: result,
+                            processingTime: Math.random() * 100 + 50
+                        });
+                    }
+                    
+                    self.postMessage({ results, batchId });
+                };
+            `;
+            
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            const worker = new Worker(URL.createObjectURL(blob));
+            
+            worker.onmessage = (e) => {
+                this.handleWorkerResult(e.data);
+            };
+            
+            this.workers.push(worker);
+        }
+        
+        console.log(`🧵 Initialized ${numWorkers} Web Workers for parallel thread processing`);
+        this.updateAccelerationType();
+    }
+    
+    updateAccelerationType() {
+        if (this.accelerationTypeSpan) {
+            const type = this.gpuAccelerated ? 
+                '🚀 GPU (WebGL Compute)' : 
+                `🧵 CPU (${this.workers.length} Workers)`;
+            this.accelerationTypeSpan.textContent = type;
+            this.accelerationTypeSpan.className = this.gpuAccelerated ? 'stat-value gpu-accelerated' : 'stat-value cpu-accelerated';
+        }
+    }
+    
+    processThreadsBatch(threads) {
+        if (this.gpuAccelerated && this.computeShader) {
+            return this.processThreadsGPU(threads);
+        } else {
+            return this.processThreadsWorkers(threads);
+        }
+    }
+    
+    processThreadsGPU(threads) {
+        if (!this.gl || !this.computeShader) return;
+        
+        const inputData = new Uint32Array(threads.length * 2);
+        for (let i = 0; i < threads.length; i++) {
+            inputData[i * 2] = threads[i].id || i;
+            inputData[i * 2 + 1] = threads[i].depth || 0;
+        }
+        
+        // Create buffers
+        const inputBuffer = this.gl.createBuffer();
+        const outputBuffer = this.gl.createBuffer();
+        
+        // Upload input data
+        this.gl.bindBuffer(this.gl.SHADER_STORAGE_BUFFER, inputBuffer);
+        this.gl.bufferData(this.gl.SHADER_STORAGE_BUFFER, inputData, this.gl.STATIC_READ);
+        this.gl.bindBufferBase(this.gl.SHADER_STORAGE_BUFFER, 0, inputBuffer);
+        
+        // Create output buffer
+        this.gl.bindBuffer(this.gl.SHADER_STORAGE_BUFFER, outputBuffer);
+        this.gl.bufferData(this.gl.SHADER_STORAGE_BUFFER, threads.length * 4, this.gl.STATIC_READ);
+        this.gl.bindBufferBase(this.gl.SHADER_STORAGE_BUFFER, 1, outputBuffer);
+        
+        // Dispatch compute shader
+        this.gl.useProgram(this.computeShader);
+        const workGroupSize = Math.ceil(threads.length / 64);
+        this.gl.dispatchCompute(workGroupSize, 1, 1);
+        this.gl.memoryBarrier(this.gl.SHADER_STORAGE_BARRIER_BIT);
+        
+        // Read results
+        this.gl.bindBuffer(this.gl.SHADER_STORAGE_BUFFER, outputBuffer);
+        const results = new Uint32Array(threads.length);
+        this.gl.getBufferSubData(this.gl.SHADER_STORAGE_BUFFER, 0, results);
+        
+        // Process results
+        for (let i = 0; i < threads.length; i++) {
+            threads[i].gpuResult = results[i];
+            threads[i].processed = true;
+        }
+        
+        // Cleanup
+        this.gl.deleteBuffer(inputBuffer);
+        this.gl.deleteBuffer(outputBuffer);
+        
+        return threads;
+    }
+    
+    processThreadsWorkers(threads) {
+        const batchId = Date.now();
+        const batchSize = Math.ceil(threads.length / this.workers.length);
+        
+        for (let i = 0; i < this.workers.length; i++) {
+            const start = i * batchSize;
+            const end = Math.min(start + batchSize, threads.length);
+            const threadBatch = threads.slice(start, end);
+            
+            if (threadBatch.length > 0) {
+                this.workers[i].postMessage({
+                    threadData: threadBatch,
+                    batchId: batchId
+                });
+            }
+        }
+    }
+    
+    handleWorkerResult(data) {
+        const { results, batchId } = data;
+        
+        for (const result of results) {
+            // Update thread with processing results
+            const thread = Array.from(this.threads.values()).find(t => 
+                t.id === result.originalId || t.name.includes(result.originalId)
+            );
+            
+            if (thread) {
+                thread.workerResult = result.result;
+                thread.processingTime = result.processingTime;
+                thread.processed = true;
+            }
+        }
+        
+        this.updateStats();
+    }
+    
     start() {
         if (this.isRunning) return;
         
@@ -106,7 +365,9 @@ class ThreadSimulator {
         // Start main thread creation loop
         this.createMainThreadLoop();
         
-        this.log(`System started - Infinite Mode (Max Depth: ${this.maxDepth === Infinity ? '∞' : this.maxDepth}, Max Threads: ${this.maxThreads === Infinity ? '∞' : this.maxThreads})`, 'SYSTEM', 0);
+        const accelerationType = this.gpuAccelerated ? 'GPU (WebGL Compute)' : `CPU (${this.workers.length} Workers)`;
+        this.log(`System started - Infinite Mode (${accelerationType})`, 'SYSTEM', 0);
+        this.log(`Max Depth: ${this.maxDepth === Infinity ? '∞' : this.maxDepth}, Max Threads: ${this.maxThreads === Infinity ? '∞' : this.maxThreads}`, 'SYSTEM', 0);
     }
     
     pause() {
@@ -161,13 +422,82 @@ class ThreadSimulator {
     createMainThreadLoop() {
         if (!this.isRunning) return;
         
-        // Always create new threads (infinite mode)
-        const threadName = `Thread-${this.threadCounter}`;
-        this.createThread(threadName, 0);
-        this.threadCounter++;
+        // Create batch of threads for GPU/parallel processing
+        const batchSize = this.gpuAccelerated ? Math.min(this.batchSize, 256) : Math.min(this.workers.length * 4, 32);
+        const threadBatch = [];
         
-        // Schedule next main thread creation
+        for (let i = 0; i < batchSize; i++) {
+            const threadName = `Thread-${this.threadCounter}`;
+            const thread = this.createThreadData(threadName, 0);
+            threadBatch.push(thread);
+            this.threadCounter++;
+        }
+        
+        // Process batch with GPU or Workers
+        if (threadBatch.length > 0) {
+            this.processingQueue.push(...threadBatch);
+            this.processBatch();
+        }
+        
+        // Schedule next batch creation
         this.mainInterval = setTimeout(() => this.createMainThreadLoop(), this.speed);
+    }
+    
+    createThreadData(name, depth, parentId = null) {
+        const threadId = `${name}-${Date.now()}-${Math.random()}`;
+        return {
+            id: threadId,
+            name: name,
+            depth: depth,
+            parentId: parentId,
+            createdAt: Date.now(),
+            timeout: null,
+            processed: false
+        };
+    }
+    
+    processBatch() {
+        if (this.processingQueue.length === 0) return;
+        
+        const batch = this.processingQueue.splice(0, Math.min(this.processingQueue.length, this.batchSize));
+        
+        // Add to threads map
+        batch.forEach(thread => {
+            this.threads.set(thread.id, thread);
+            this.totalThreadsCreated++;
+            this.maxDepthReached = Math.max(this.maxDepthReached, thread.depth);
+        });
+        
+        // Process with GPU or Workers
+        this.processThreadsBatch(batch);
+        
+        // Visualize and log results
+        batch.forEach(thread => {
+            this.log(`Thread ${thread.name} started at depth ${thread.depth}`, thread.name, thread.depth);
+            this.visualizeThread(thread);
+            
+            // Schedule child thread creation
+            if (thread.depth < this.maxDepth && this.isRunning) {
+                thread.timeout = setTimeout(() => {
+                    if (this.isRunning && this.threads.has(thread.id)) {
+                        const childThread = this.createThreadData(thread.name + '*', thread.depth + 1, thread.id);
+                        this.processingQueue.push(childThread);
+                        
+                        // Remove parent thread after creating child
+                        setTimeout(() => {
+                            this.removeThread(thread.id);
+                        }, this.speed * 2);
+                    }
+                }, this.speed + Math.random() * this.speed);
+            } else {
+                // Remove thread after some time if it won't create children
+                thread.timeout = setTimeout(() => {
+                    this.removeThread(thread.id);
+                }, this.speed * 3);
+            }
+        });
+        
+        this.updateStats();
     }
     
     createThread(name, depth, parentId = null) {
@@ -422,6 +752,13 @@ Thread Details:
         this.activeThreadsSpan.textContent = this.threads.size;
         this.totalThreadsSpan.textContent = this.totalThreadsCreated;
         this.maxDepthReachedSpan.textContent = this.maxDepthReached === Infinity ? '∞' : this.maxDepthReached;
+        
+        // Calculate processing rate
+        if (this.startTime && this.processingRateSpan) {
+            const elapsed = (Date.now() - this.startTime) / 1000;
+            const rate = elapsed > 0 ? Math.round(this.totalThreadsCreated / elapsed) : 0;
+            this.processingRateSpan.textContent = `${rate}/sec`;
+        }
         
         // Update settings display
         if (this.maxDepthInput) {

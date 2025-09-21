@@ -11,6 +11,15 @@ class CollatzSimulator {
         this.mainInterval = null;
         this.cleanupIntervalId = null;
         
+        // GPU acceleration for Collatz calculations
+        this.gpuAccelerated = false;
+        this.gl = null;
+        this.collatzComputeShader = null;
+        this.workers = [];
+        this.batchSize = 2048; // Larger batches for Collatz calculations
+        this.processingQueue = [];
+        this.pendingBatches = new Map();
+        
         // Records
         this.records = {
             mostSteps: { number: 0, steps: 0 },
@@ -35,6 +44,7 @@ class CollatzSimulator {
         // UI elements
         this.initializeElements();
         this.setupEventListeners();
+        this.initializeCollatzGPU();
         this.updateStats();
         this.currentView = 'tree';
     }
@@ -53,11 +63,13 @@ class CollatzSimulator {
         this.showSequencesInput = document.getElementById('showSequences');
         
         // Stats
+        this.accelerationTypeSpan = document.getElementById('accelerationType');
         this.activeCalculationsSpan = document.getElementById('activeCalculations');
         this.numbersTestedSpan = document.getElementById('numbersTested');
         this.longestSequenceSpan = document.getElementById('longestSequence');
         this.highestPeakSpan = document.getElementById('highestPeak');
         this.currentNumberSpan = document.getElementById('currentNumber');
+        this.processingRateSpan = document.getElementById('processingRate');
         this.runtimeSpan = document.getElementById('runtime');
         
         // Records
@@ -126,6 +138,327 @@ class CollatzSimulator {
         this.exportGraphBtn?.addEventListener('click', () => this.exportGraph());
     }
     
+    initializeCollatzGPU() {
+        try {
+            // Create a canvas for WebGL compute
+            const canvas = document.createElement('canvas');
+            canvas.width = 1;
+            canvas.height = 1;
+            this.gl = canvas.getContext('webgl2-compute', {antialias: false});
+            
+            if (!this.gl) {
+                console.log('WebGL2 Compute not supported, falling back to Web Workers for Collatz');
+                this.initializeCollatzWorkers();
+                return;
+            }
+            
+            // Create compute shader for parallel Collatz calculations
+            const collatzComputeSource = `#version 310 es
+                layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+                
+                layout(std430, binding = 0) restrict readonly buffer InputBuffer {
+                    uint inputNumbers[];
+                };
+                
+                layout(std430, binding = 1) restrict writeonly buffer OutputBuffer {
+                    uint outputData[]; // steps, maxValue pairs
+                };
+                
+                void calculateCollatz(uint n, uint index) {
+                    uint current = n;
+                    uint steps = 0u;
+                    uint maxValue = n;
+                    
+                    // Calculate Collatz sequence
+                    while (current != 1u && steps < 10000u) {
+                        if (current % 2u == 0u) {
+                            current = current / 2u;
+                        } else {
+                            current = current * 3u + 1u;
+                        }
+                        steps++;
+                        maxValue = max(maxValue, current);
+                        
+                        // Prevent overflow
+                        if (current > 100000000u) break;
+                    }
+                    
+                    // Store results: steps and maxValue
+                    outputData[index * 2u] = steps;
+                    outputData[index * 2u + 1u] = maxValue;
+                }
+                
+                void main() {
+                    uint index = gl_GlobalInvocationID.x;
+                    if (index >= inputNumbers.length()) return;
+                    
+                    uint number = inputNumbers[index];
+                    calculateCollatz(number, index);
+                }
+            `;
+            
+            this.collatzComputeShader = this.createComputeShader(collatzComputeSource);
+            if (this.collatzComputeShader) {
+                this.gpuAccelerated = true;
+                console.log('🚀 GPU acceleration enabled for Collatz calculations!');
+                this.updateAccelerationType();
+            } else {
+                this.initializeCollatzWorkers();
+            }
+            
+        } catch (error) {
+            console.log('Collatz GPU initialization failed, using Web Workers:', error);
+            this.initializeCollatzWorkers();
+        }
+    }
+    
+    createComputeShader(source) {
+        if (!this.gl) return null;
+        
+        const shader = this.gl.createShader(this.gl.COMPUTE_SHADER);
+        this.gl.shaderSource(shader, source);
+        this.gl.compileShader(shader);
+        
+        if (!this.gl.getShaderParameter(shader, this.gl.COMPILE_STATUS)) {
+            console.error('Collatz compute shader compilation failed:', this.gl.getShaderInfoLog(shader));
+            return null;
+        }
+        
+        const program = this.gl.createProgram();
+        this.gl.attachShader(program, shader);
+        this.gl.linkProgram(program);
+        
+        if (!this.gl.getProgramParameter(program, this.gl.LINK_STATUS)) {
+            console.error('Collatz compute shader program linking failed:', this.gl.getProgramInfoLog(program));
+            return null;
+        }
+        
+        return program;
+    }
+    
+    initializeCollatzWorkers() {
+        const numWorkers = navigator.hardwareConcurrency || 4;
+        
+        for (let i = 0; i < numWorkers; i++) {
+            const workerCode = `
+                function calculateCollatzSequence(n) {
+                    const sequence = [n];
+                    let current = n;
+                    let steps = 0;
+                    let maxValue = n;
+                    
+                    while (current !== 1 && steps < 10000) {
+                        if (current % 2 === 0) {
+                            current = current / 2;
+                        } else {
+                            current = current * 3 + 1;
+                        }
+                        sequence.push(current);
+                        maxValue = Math.max(maxValue, current);
+                        steps++;
+                        
+                        // Prevent infinite loops
+                        if (current > 100000000) break;
+                    }
+                    
+                    return {
+                        sequence: sequence,
+                        steps: steps,
+                        maxValue: maxValue
+                    };
+                }
+                
+                self.onmessage = function(e) {
+                    const { numbers, batchId } = e.data;
+                    const results = [];
+                    
+                    for (const number of numbers) {
+                        const result = calculateCollatzSequence(number);
+                        results.push({
+                            number: number,
+                            steps: result.steps,
+                            maxValue: result.maxValue,
+                            sequence: result.sequence.slice(0, 20) // Limit sequence length for performance
+                        });
+                    }
+                    
+                    self.postMessage({ results, batchId });
+                };
+            `;
+            
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            const worker = new Worker(URL.createObjectURL(blob));
+            
+            worker.onmessage = (e) => {
+                this.handleCollatzWorkerResult(e.data);
+            };
+            
+            this.workers.push(worker);
+        }
+        
+        console.log(`🧵 Initialized ${numWorkers} Web Workers for parallel Collatz calculations`);
+        this.updateAccelerationType();
+    }
+    
+    updateAccelerationType() {
+        if (this.accelerationTypeSpan) {
+            const type = this.gpuAccelerated ? 
+                '🚀 GPU (WebGL Compute)' : 
+                `🧵 CPU (${this.workers.length} Workers)`;
+            this.accelerationTypeSpan.textContent = type;
+            this.accelerationTypeSpan.className = this.gpuAccelerated ? 'stat-value gpu-accelerated' : 'stat-value cpu-accelerated';
+        }
+    }
+    
+    calculateCollatzBatch(numbers) {
+        if (this.gpuAccelerated && this.collatzComputeShader) {
+            return this.calculateCollatzGPU(numbers);
+        } else {
+            return this.calculateCollatzWorkers(numbers);
+        }
+    }
+    
+    calculateCollatzGPU(numbers) {
+        if (!this.gl || !this.collatzComputeShader) return [];
+        
+        const inputData = new Uint32Array(numbers);
+        const outputSize = numbers.length * 2; // steps and maxValue for each number
+        
+        // Create buffers
+        const inputBuffer = this.gl.createBuffer();
+        const outputBuffer = this.gl.createBuffer();
+        
+        // Upload input data
+        this.gl.bindBuffer(this.gl.SHADER_STORAGE_BUFFER, inputBuffer);
+        this.gl.bufferData(this.gl.SHADER_STORAGE_BUFFER, inputData, this.gl.STATIC_READ);
+        this.gl.bindBufferBase(this.gl.SHADER_STORAGE_BUFFER, 0, inputBuffer);
+        
+        // Create output buffer
+        this.gl.bindBuffer(this.gl.SHADER_STORAGE_BUFFER, outputBuffer);
+        this.gl.bufferData(this.gl.SHADER_STORAGE_BUFFER, outputSize * 4, this.gl.STATIC_READ);
+        this.gl.bindBufferBase(this.gl.SHADER_STORAGE_BUFFER, 1, outputBuffer);
+        
+        // Dispatch compute shader
+        this.gl.useProgram(this.collatzComputeShader);
+        const workGroupSize = Math.ceil(numbers.length / 64);
+        this.gl.dispatchCompute(workGroupSize, 1, 1);
+        this.gl.memoryBarrier(this.gl.SHADER_STORAGE_BARRIER_BIT);
+        
+        // Read results
+        this.gl.bindBuffer(this.gl.SHADER_STORAGE_BUFFER, outputBuffer);
+        const rawResults = new Uint32Array(outputSize);
+        this.gl.getBufferSubData(this.gl.SHADER_STORAGE_BUFFER, 0, rawResults);
+        
+        // Process results
+        const results = [];
+        for (let i = 0; i < numbers.length; i++) {
+            const steps = rawResults[i * 2];
+            const maxValue = rawResults[i * 2 + 1];
+            
+            results.push({
+                number: numbers[i],
+                steps: steps,
+                maxValue: maxValue,
+                sequence: [], // GPU doesn't store full sequence for performance
+                gpuProcessed: true
+            });
+        }
+        
+        // Cleanup
+        this.gl.deleteBuffer(inputBuffer);
+        this.gl.deleteBuffer(outputBuffer);
+        
+        return results;
+    }
+    
+    calculateCollatzWorkers(numbers) {
+        const batchId = Date.now();
+        const batchSize = Math.ceil(numbers.length / this.workers.length);
+        
+        // Store batch info for result handling
+        this.pendingBatches.set(batchId, {
+            expectedResults: numbers.length,
+            receivedResults: 0,
+            results: []
+        });
+        
+        for (let i = 0; i < this.workers.length; i++) {
+            const start = i * batchSize;
+            const end = Math.min(start + batchSize, numbers.length);
+            const numberBatch = numbers.slice(start, end);
+            
+            if (numberBatch.length > 0) {
+                this.workers[i].postMessage({
+                    numbers: numberBatch,
+                    batchId: batchId
+                });
+            }
+        }
+        
+        return batchId; // Return batch ID for async handling
+    }
+    
+    handleCollatzWorkerResult(data) {
+        const { results, batchId } = data;
+        const batch = this.pendingBatches.get(batchId);
+        
+        if (!batch) return;
+        
+        batch.results.push(...results);
+        batch.receivedResults += results.length;
+        
+        // Check if batch is complete
+        if (batch.receivedResults >= batch.expectedResults) {
+            this.processBatchResults(batch.results);
+            this.pendingBatches.delete(batchId);
+        }
+    }
+    
+    processBatchResults(results) {
+        for (const result of results) {
+            // Update records
+            this.updateRecords(result.number, result);
+            
+            // Add to graph data
+            this.graphData.push({ 
+                x: result.number, 
+                y: result.steps, 
+                peak: result.maxValue 
+            });
+            
+            // Create calculation entry
+            const calcId = `Collatz-${result.number}-${Date.now()}`;
+            const calculation = {
+                id: calcId,
+                number: result.number,
+                name: `Collatz-${result.number}`,
+                depth: 0,
+                result: {
+                    sequence: result.sequence || [],
+                    steps: result.steps,
+                    maxValue: result.maxValue
+                },
+                createdAt: Date.now(),
+                processed: true
+            };
+            
+            this.calculations.set(calcId, calculation);
+            this.numbersTested++;
+            this.longestSequence = Math.max(this.longestSequence, result.steps);
+            this.highestPeak = Math.max(this.highestPeak, result.maxValue);
+            
+            // Log significant results
+            if (result.steps > 100 || result.maxValue > result.number * 100) {
+                this.log(`⭐ Number ${result.number}: ${result.steps} steps, peak ${result.maxValue}`, `Collatz-${result.number}`, 0);
+            }
+            
+            this.visualizeCalculation(calculation);
+        }
+        
+        this.updateStats();
+        this.updateGraph();
+    }
+    
     calculateCollatzSequence(n) {
         const sequence = [n];
         let current = n;
@@ -167,7 +500,9 @@ class CollatzSimulator {
         // Start main calculation loop
         this.createMainCalculationLoop();
         
-        this.log(`Collatz exploration started - Infinite Mode (Max Number: ${this.maxNumber === Infinity ? '∞' : this.maxNumber}, Max Depth: ${this.maxDepth === Infinity ? '∞' : this.maxDepth})`, 'SYSTEM', 0);
+        const accelerationType = this.gpuAccelerated ? 'GPU (WebGL Compute)' : `CPU (${this.workers.length} Workers)`;
+        this.log(`Collatz exploration started - Infinite Mode (${accelerationType})`, 'SYSTEM', 0);
+        this.log(`Max Number: ${this.maxNumber === Infinity ? '∞' : this.maxNumber}, Max Depth: ${this.maxDepth === Infinity ? '∞' : this.maxDepth}`, 'SYSTEM', 0);
     }
     
     pause() {
@@ -232,11 +567,24 @@ class CollatzSimulator {
     createMainCalculationLoop() {
         if (!this.isRunning) return;
         
-        // Always create new calculations (infinite mode)
-        this.createCollatzCalculation(this.currentNumber, `Collatz-${this.currentNumber}`, 0);
-        this.currentNumber++;
+        // Create batch of numbers for GPU/parallel processing
+        const batchSize = this.gpuAccelerated ? Math.min(this.batchSize, 1024) : Math.min(this.workers.length * 16, 64);
+        const numbers = [];
         
-        // Schedule next calculation
+        for (let i = 0; i < batchSize; i++) {
+            numbers.push(this.currentNumber);
+            this.currentNumber++;
+        }
+        
+        // Process batch with GPU or Workers
+        if (this.gpuAccelerated) {
+            const results = this.calculateCollatzGPU(numbers);
+            this.processBatchResults(results);
+        } else {
+            this.calculateCollatzWorkers(numbers);
+        }
+        
+        // Schedule next batch
         this.mainInterval = setTimeout(() => this.createMainCalculationLoop(), this.speed);
     }
     
@@ -574,6 +922,13 @@ Collatz Calculation Details:
         this.longestSequenceSpan.textContent = this.longestSequence;
         this.highestPeakSpan.textContent = this.highestPeak;
         this.currentNumberSpan.textContent = this.currentNumber;
+        
+        // Calculate processing rate
+        if (this.startTime && this.processingRateSpan) {
+            const elapsed = (Date.now() - this.startTime) / 1000;
+            const rate = elapsed > 0 ? Math.round(this.numbersTested / elapsed) : 0;
+            this.processingRateSpan.textContent = `${rate}/sec`;
+        }
         
         // Update settings display with infinity symbols
         if (this.maxNumberInput) {

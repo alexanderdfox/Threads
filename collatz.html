@@ -76,6 +76,10 @@
                 <div class="stats-panel">
                     <h3><i class="fas fa-chart-bar"></i> Statistics</h3>
                     <div class="stat-item">
+                        <span class="stat-label">Acceleration:</span>
+                        <span id="accelerationType" class="stat-value">Initializing...</span>
+                    </div>
+                    <div class="stat-item">
                         <span class="stat-label">Active Calculations:</span>
                         <span id="activeCalculations" class="stat-value">0</span>
                     </div>
@@ -94,6 +98,10 @@
                     <div class="stat-item">
                         <span class="stat-label">Current Number:</span>
                         <span id="currentNumber" class="stat-value">1</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Processing Rate:</span>
+                        <span id="processingRate" class="stat-value">0/sec</span>
                     </div>
                     <div class="stat-item">
                         <span class="stat-label">Runtime:</span>
@@ -188,5 +196,28 @@
     </div>
 
     <script src="collatz.js"></script>
+    
+    <script>
+        // Display WebGL support status on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.createElement('canvas');
+            const webgl2Support = !!canvas.getContext('webgl2');
+            const webglComputeSupport = !!canvas.getContext('webgl2-compute');
+            
+            console.log('🔍 WebGL Support Check for Collatz:');
+            console.log(`   WebGL2: ${webgl2Support ? '✅ Supported' : '❌ Not supported'}`);
+            console.log(`   WebGL2 Compute: ${webglComputeSupport ? '✅ Supported (GPU acceleration available!)' : '❌ Not supported (Will use Web Workers)'}`);
+            
+            // Update page title with acceleration info
+            setTimeout(() => {
+                const accelerationType = document.getElementById('accelerationType');
+                if (accelerationType && accelerationType.textContent.includes('GPU')) {
+                    document.title = '🚀 ' + document.title;
+                } else if (accelerationType && accelerationType.textContent.includes('CPU')) {
+                    document.title = '🧵 ' + document.title;
+                }
+            }, 1000);
+        });
+    </script>
 </body>
 </html>
