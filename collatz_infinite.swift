@@ -2,8 +2,11 @@ import Foundation
 import Dispatch
 import Metal
 import MetalKit
+import simd
+import Accelerate
+import os
 
-// Metal compute shader for infinite Collatz exploration
+// Advanced Metal compute shader for infinite Collatz exploration with optimizations
 let infiniteMetalShaderSource = """
 #include <metal_stdlib>
 using namespace metal;
@@ -12,33 +15,111 @@ struct CollatzResult {
     uint steps;
     uint maxValue;
     uint originalNumber;
+    uint convergencePattern; // New: track convergence patterns
 };
 
+struct CollatzStats {
+    uint totalCalculations;
+    uint recordSteps;
+    uint recordNumber;
+    float averageSteps;
+};
+
+// Optimized Collatz computation with unrolled loops
 kernel void infiniteCollatzCompute(device const uint* inputNumbers [[buffer(0)]],
                                   device CollatzResult* results [[buffer(1)]],
-                                  uint index [[thread_position_in_grid]]) {
+                                  device atomic_uint* globalStats [[buffer(2)]],
+                                  constant uint& maxSteps [[buffer(3)]],
+                                  uint index [[thread_position_in_grid]],
+                                  uint threadgroup_position_in_grid [[threadgroup_position_in_grid]],
+                                  uint thread_position_in_threadgroup [[thread_position_in_threadgroup]]) {
+    
     uint n = inputNumbers[index];
     uint current = n;
     uint steps = 0;
     uint maxValue = n;
+    uint convergencePattern = 0;
     
-    // Allow more steps for infinite exploration
-    while (current != 1 && steps < 100000) {
-        if (current % 2 == 0) {
-            current = current / 2;
-        } else {
-            current = current * 3 + 1;
+    // Early exit for known small values
+    if (n <= 1) {
+        results[index] = {0, n, n, 0};
+        return;
+    }
+    
+    // Optimized Collatz computation with loop unrolling
+    while (current != 1 && steps < maxSteps) {
+        // Unroll loop for better performance (process 4 iterations at once when possible)
+        for (uint unroll = 0; unroll < 4 && current != 1 && steps < maxSteps; unroll++) {
+            if (current % 2 == 0) {
+                current = current >> 1;  // Bit shift is faster than division
+                convergencePattern |= (1 << (steps % 32)); // Track even steps
+            } else {
+                current = current * 3 + 1;
+                // Check for potential overflow
+                if (current > 1000000000 || current < n) break;
+            }
+            steps++;
+            maxValue = max(maxValue, current);
         }
-        steps++;
-        maxValue = max(maxValue, current);
         
-        // Prevent overflow
-        if (current > 1000000000) break;
+        // Prevent infinite loops
+        if (current > 1000000000 || steps > maxSteps) break;
     }
     
     results[index].steps = steps;
     results[index].maxValue = maxValue;
     results[index].originalNumber = n;
+    results[index].convergencePattern = convergencePattern;
+    
+    // Update global statistics atomically
+    atomic_fetch_add_explicit(&globalStats[0], 1, memory_order_relaxed); // total calculations
+    
+    // Update record if this is a new record (use atomic compare-and-swap)
+    uint currentRecord = atomic_load_explicit(&globalStats[1], memory_order_relaxed);
+    if (steps > currentRecord) {
+        atomic_compare_exchange_weak_explicit(&globalStats[1], &currentRecord, steps, 
+                                            memory_order_relaxed, memory_order_relaxed);
+        if (steps > currentRecord) {
+            atomic_store_explicit(&globalStats[2], n, memory_order_relaxed); // record number
+        }
+    }
+}
+
+// Specialized kernel for SIMD-width processing (process multiple numbers per thread)
+kernel void vectorizedCollatzCompute(device const uint4* inputVectors [[buffer(0)]],
+                                    device CollatzResult* results [[buffer(1)]],
+                                    device atomic_uint* globalStats [[buffer(2)]],
+                                    constant uint& maxSteps [[buffer(3)]],
+                                    uint index [[thread_position_in_grid]]) {
+    
+    uint4 numbers = inputVectors[index];
+    
+    // Process 4 numbers simultaneously using SIMD
+    for (uint i = 0; i < 4; i++) {
+        uint n = numbers[i];
+        uint current = n;
+        uint steps = 0;
+        uint maxValue = n;
+        
+        while (current != 1 && steps < maxSteps) {
+            if (current % 2 == 0) {
+                current = current >> 1;
+            } else {
+                current = current * 3 + 1;
+                if (current > 1000000000) break;
+            }
+            steps++;
+            maxValue = max(maxValue, current);
+        }
+        
+        uint resultIndex = index * 4 + i;
+        results[resultIndex].steps = steps;
+        results[resultIndex].maxValue = maxValue;
+        results[resultIndex].originalNumber = n;
+        results[resultIndex].convergencePattern = 0;
+        
+        atomic_fetch_add_explicit(&globalStats[0], 1, memory_order_relaxed);
+    }
 }
 """
 
@@ -46,16 +127,167 @@ struct InfiniteCollatzResult {
     let steps: UInt32
     let maxValue: UInt32
     let originalNumber: UInt32
+    let convergencePattern: UInt32
 }
 
-class GPUInfiniteCollatzExplorer {
+// Extension for array chunking
+extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        return stride(from: 0, to: count, by: size).map {
+            Array(self[$0..<Swift.min($0 + size, count)])
+        }
+    }
+}
+
+// SIMD-optimized Collatz calculation using Swift's SIMD types
+struct SIMDCollatzProcessor {
+    static func calculateCollatzSIMD4(_ numbers: simd_uint4) -> [InfiniteCollatzResult] {
+        var results: [InfiniteCollatzResult] = []
+        
+        // Process 4 numbers simultaneously using SIMD operations
+        var current = numbers
+        var steps = simd_uint4(0, 0, 0, 0)
+        var maxValues = numbers
+        let ones = simd_uint4(1, 1, 1, 1)
+        
+        // Simplified vectorized Collatz computation (avoiding complex SIMD masking)
+        for _ in 0..<10000 {
+            let notOne = current .!= ones
+            if !any(notOne) { break }
+            
+            // Process each element individually but in parallel
+            for i in 0..<4 {
+                if current[i] != 1 && current[i] <= 1000000000 {
+                    if current[i] % 2 == 0 {
+                        current[i] = current[i] / 2
+                    } else {
+                        current[i] = current[i] * 3 + 1
+                    }
+                    steps[i] += 1
+                    maxValues[i] = max(maxValues[i], current[i])
+                }
+            }
+            
+            // Check for overflow
+            let overflow = current .> simd_uint4(1000000000, 1000000000, 1000000000, 1000000000)
+            if any(overflow) { break }
+        }
+        
+        // Convert SIMD results back to individual results
+        for i in 0..<4 {
+            results.append(InfiniteCollatzResult(
+                steps: steps[i],
+                maxValue: maxValues[i],
+                originalNumber: numbers[i],
+                convergencePattern: 0
+            ))
+        }
+        
+        return results
+    }
+    
+    static func calculateCollatzSIMD8(_ numbers: [UInt32]) -> [InfiniteCollatzResult] {
+        var results: [InfiniteCollatzResult] = []
+        
+        // Process numbers in groups of 8 using SIMD8
+        let chunkSize = 8
+        for chunk in numbers.chunked(into: chunkSize) {
+            var paddedChunk = Array(chunk)
+            while paddedChunk.count < chunkSize {
+                paddedChunk.append(1) // Pad with 1s (quick to compute)
+            }
+            
+            // Split into two SIMD4 operations
+            let first4 = simd_uint4(paddedChunk[0], paddedChunk[1], paddedChunk[2], paddedChunk[3])
+            let second4 = simd_uint4(paddedChunk[4], paddedChunk[5], paddedChunk[6], paddedChunk[7])
+            
+            results.append(contentsOf: calculateCollatzSIMD4(first4))
+            results.append(contentsOf: calculateCollatzSIMD4(second4))
+        }
+        
+        return Array(results.prefix(numbers.count))
+    }
+}
+
+// GCD-based concurrent processor for CPU optimization
+class GCDCollatzProcessor {
+    private let concurrentQueue: DispatchQueue
+    private let processingGroup: DispatchGroup
+    private let semaphore: DispatchSemaphore
+    let maxConcurrentOperations: Int
+    
+    init() {
+        let cpuCount = ProcessInfo.processInfo.activeProcessorCount
+        self.maxConcurrentOperations = max(cpuCount * 2, 8) // Use 2x CPU cores
+        
+        self.concurrentQueue = DispatchQueue(
+            label: "collatz.concurrent.processing",
+            qos: .userInteractive,
+            attributes: .concurrent
+        )
+        self.processingGroup = DispatchGroup()
+        self.semaphore = DispatchSemaphore(value: maxConcurrentOperations)
+        
+        print("🧵 GCD Processor initialized with \(maxConcurrentOperations) concurrent operations")
+    }
+    
+    func processNumbers(_ numbers: [UInt32], completion: @escaping ([InfiniteCollatzResult]) -> Void) {
+        let chunkSize = max(numbers.count / maxConcurrentOperations, 100)
+        let chunks = numbers.chunked(into: chunkSize)
+        var allResults: [InfiniteCollatzResult] = []
+        let resultsLock = NSLock()
+        
+        let startTime = CFAbsoluteTimeGetCurrent()
+        
+        for chunk in chunks {
+            processingGroup.enter()
+            semaphore.wait()
+            
+            concurrentQueue.async { [weak self] in
+                defer {
+                    self?.semaphore.signal()
+                    self?.processingGroup.leave()
+                }
+                
+                // Use SIMD for chunk processing
+                let chunkResults = SIMDCollatzProcessor.calculateCollatzSIMD8(chunk)
+                
+                resultsLock.lock()
+                allResults.append(contentsOf: chunkResults)
+                resultsLock.unlock()
+            }
+        }
+        
+        processingGroup.notify(queue: .main) {
+            let processingTime = CFAbsoluteTimeGetCurrent() - startTime
+            let rate = Double(numbers.count) / processingTime
+            print("🧵 GCD processed \(numbers.count) numbers in \(String(format: "%.2f", processingTime))s (\(String(format: "%.0f", rate))/sec)")
+            
+            completion(allResults.sorted { $0.originalNumber < $1.originalNumber })
+        }
+    }
+}
+
+class HybridInfiniteCollatzExplorer {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let computePipelineState: MTLComputePipelineState
+    private let vectorizedPipelineState: MTLComputePipelineState
+    private let gcdProcessor: GCDCollatzProcessor
     private var mostStepsRecord: (number: UInt32, steps: UInt32) = (0, 0)
     private let recordLock = NSLock()
     private var totalProcessed: UInt64 = 0
     private let startTime = CFAbsoluteTimeGetCurrent()
+    
+    // Performance tracking
+    private var metalPerformance: (totalTime: Double, totalNumbers: Int) = (0, 0)
+    private var gcdPerformance: (totalTime: Double, totalNumbers: Int) = (0, 0)
+    private var simdPerformance: (totalTime: Double, totalNumbers: Int) = (0, 0)
+    
+    // Adaptive processing thresholds
+    private let metalThreshold = 1000    // Use Metal for batches > 1000
+    private let gcdThreshold = 100       // Use GCD for batches > 100
+    private let simdThreshold = 10       // Use SIMD for batches > 10
     
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -74,201 +306,483 @@ class GPUInfiniteCollatzExplorer {
         
         do {
             let library = try device.makeLibrary(source: infiniteMetalShaderSource, options: nil)
-            let kernelFunction = library.makeFunction(name: "infiniteCollatzCompute")
-            self.computePipelineState = try device.makeComputePipelineState(function: kernelFunction!)
+            
+            // Create standard compute pipeline
+            guard let kernelFunction = library.makeFunction(name: "infiniteCollatzCompute") else {
+                print("Failed to create kernel function")
+                return nil
+            }
+            self.computePipelineState = try device.makeComputePipelineState(function: kernelFunction)
+            
+            // Create vectorized compute pipeline
+            guard let vectorizedFunction = library.makeFunction(name: "vectorizedCollatzCompute") else {
+                print("Failed to create vectorized kernel function")
+                return nil
+            }
+            self.vectorizedPipelineState = try device.makeComputePipelineState(function: vectorizedFunction)
+            
         } catch {
             print("Failed to create compute pipeline state: \(error)")
             return nil
         }
+        
+        // Initialize GCD processor
+        self.gcdProcessor = GCDCollatzProcessor()
+        
+        print("🚀 Hybrid Collatz Explorer initialized with Metal GPU + GCD + SIMD")
+        print("   GPU: \(device.name)")
+        print("   Max threads per threadgroup: \(computePipelineState.maxTotalThreadsPerThreadgroup)")
+        print("   GCD concurrent operations: \(maxConcurrentOperations)")
+        print("   Processing thresholds: Metal ≥\(metalThreshold), GCD ≥\(gcdThreshold), SIMD ≥\(simdThreshold)")
     }
     
-    func exploreCollatzBatch(numbers: [UInt32]) -> [InfiniteCollatzResult] {
-        let inputBuffer = device.makeBuffer(bytes: numbers, length: numbers.count * MemoryLayout<UInt32>.size, options: [])!
-        let outputBuffer = device.makeBuffer(length: numbers.count * MemoryLayout<InfiniteCollatzResult>.size, options: [])!
+    // Intelligent processing method that chooses the best approach
+    func processNumbers(_ numbers: [UInt32]) -> [InfiniteCollatzResult] {
+        let count = numbers.count
+        let startTime = CFAbsoluteTimeGetCurrent()
         
-        let commandBuffer = commandQueue.makeCommandBuffer()!
-        let computeEncoder = commandBuffer.makeComputeCommandEncoder()!
+        var results: [InfiniteCollatzResult] = []
+        
+        if count >= metalThreshold {
+            // Use Metal GPU for large batches
+            let range = "\(numbers.first ?? 0)-\(numbers.last ?? 0)"
+            print("⚡ Using Metal GPU for \(count) numbers (range: \(range))")
+            results = processWithMetal(numbers)
+            
+            let processingTime = CFAbsoluteTimeGetCurrent() - startTime
+            metalPerformance.totalTime += processingTime
+            metalPerformance.totalNumbers += count
+            
+        } else if count >= gcdThreshold {
+            // Use GCD for medium batches
+            let range = "\(numbers.first ?? 0)-\(numbers.last ?? 0)"
+            print("🧵 Using GCD + SIMD for \(count) numbers (range: \(range))")
+            let semaphore = DispatchSemaphore(value: 0)
+            
+            gcdProcessor.processNumbers(numbers) { gcdResults in
+                results = gcdResults
+                semaphore.signal()
+            }
+            semaphore.wait()
+            
+            let processingTime = CFAbsoluteTimeGetCurrent() - startTime
+            gcdPerformance.totalTime += processingTime
+            gcdPerformance.totalNumbers += count
+            
+        } else if count >= simdThreshold {
+            // Use SIMD for small-medium batches
+            let range = "\(numbers.first ?? 0)-\(numbers.last ?? 0)"
+            print("🔢 Using SIMD for \(count) numbers (range: \(range))")
+            results = SIMDCollatzProcessor.calculateCollatzSIMD8(numbers)
+            
+            let processingTime = CFAbsoluteTimeGetCurrent() - startTime
+            simdPerformance.totalTime += processingTime
+            simdPerformance.totalNumbers += count
+            
+        } else {
+            // Use sequential processing for very small batches
+            let range = "\(numbers.first ?? 0)-\(numbers.last ?? 0)"
+            print("🔄 Using sequential processing for \(count) numbers (range: \(range))")
+            results = processSequential(numbers)
+        }
+        
+        // Update records
+        updateRecords(results)
+        totalProcessed += UInt64(count)
+        
+        let totalTime = CFAbsoluteTimeGetCurrent() - startTime
+        let rate = Double(count) / totalTime
+        
+        // Show sample of results with current numbers and steps
+        let sampleResults = results.prefix(5)
+        for result in sampleResults {
+            print("   → \(result.originalNumber): \(result.steps) steps")
+        }
+        if results.count > 5 {
+            print("   ... and \(results.count - 5) more")
+        }
+        
+        print("   Batch completed in \(String(format: "%.3f", totalTime))s (\(String(format: "%.0f", rate))/sec)")
+        
+        return results
+    }
+    
+    private func processWithMetal(_ numbers: [UInt32]) -> [InfiniteCollatzResult] {
+        // Decide between standard and vectorized kernel
+        let useVectorized = numbers.count >= 4000
+        
+        if useVectorized {
+            return processWithVectorizedMetal(numbers)
+        } else {
+            return processWithStandardMetal(numbers)
+        }
+    }
+    
+    private func processWithStandardMetal(_ numbers: [UInt32]) -> [InfiniteCollatzResult] {
+        let inputData = numbers
+        let maxSteps: UInt32 = 100000
+        
+        // Create buffers
+        guard let inputBuffer = device.makeBuffer(bytes: inputData, length: inputData.count * MemoryLayout<UInt32>.size, options: []),
+              let outputBuffer = device.makeBuffer(length: inputData.count * MemoryLayout<InfiniteCollatzResult>.size, options: []),
+              let statsBuffer = device.makeBuffer(length: 4 * MemoryLayout<UInt32>.size, options: []),
+              let maxStepsBuffer = device.makeBuffer(bytes: [maxSteps], length: MemoryLayout<UInt32>.size, options: []) else {
+            return []
+        }
+        
+        // Initialize stats buffer
+        let statsPointer = statsBuffer.contents().bindMemory(to: UInt32.self, capacity: 4)
+        statsPointer[0] = 0  // total calculations
+        statsPointer[1] = 0  // record steps
+        statsPointer[2] = 0  // record number
+        statsPointer[3] = 0  // reserved
+        
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            return []
+        }
         
         computeEncoder.setComputePipelineState(computePipelineState)
         computeEncoder.setBuffer(inputBuffer, offset: 0, index: 0)
         computeEncoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        computeEncoder.setBuffer(statsBuffer, offset: 0, index: 2)
+        computeEncoder.setBuffer(maxStepsBuffer, offset: 0, index: 3)
         
-        let threadsPerGroup = MTLSize(width: min(numbers.count, computePipelineState.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
-        let numGroups = MTLSize(width: (numbers.count + threadsPerGroup.width - 1) / threadsPerGroup.width, height: 1, depth: 1)
+        let threadsPerThreadgroup = MTLSize(width: min(inputData.count, computePipelineState.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        let numThreadgroups = MTLSize(width: (inputData.count + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width, height: 1, depth: 1)
         
-        computeEncoder.dispatchThreadgroups(numGroups, threadsPerThreadgroup: threadsPerGroup)
+        computeEncoder.dispatchThreadgroups(numThreadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
         computeEncoder.endEncoding()
         
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         
-        let resultPointer = outputBuffer.contents().bindMemory(to: InfiniteCollatzResult.self, capacity: numbers.count)
-        let results = Array(UnsafeBufferPointer(start: resultPointer, count: numbers.count))
+        // Read results
+        let resultPointer = outputBuffer.contents().bindMemory(to: InfiniteCollatzResult.self, capacity: inputData.count)
+        let results = Array(UnsafeBufferPointer(start: resultPointer, count: inputData.count))
+        
+        // Read global stats
+        let finalStats = Array(UnsafeBufferPointer(start: statsPointer, count: 4))
+        if finalStats[1] > mostStepsRecord.steps {
+            recordLock.lock()
+            if finalStats[1] > mostStepsRecord.steps {
+                mostStepsRecord = (number: finalStats[2], steps: finalStats[1])
+                print("🏆 NEW GPU RECORD! Number: \(finalStats[2]) took \(finalStats[1]) steps")
+            }
+            recordLock.unlock()
+        }
         
         return results
     }
     
-    func checkForRecords(_ results: [InfiniteCollatzResult]) {
+    private func processWithVectorizedMetal(_ numbers: [UInt32]) -> [InfiniteCollatzResult] {
+        // Pad numbers to multiple of 4 for SIMD processing
+        var paddedNumbers = numbers
+        while paddedNumbers.count % 4 != 0 {
+            paddedNumbers.append(1)
+        }
+        
+        // Convert to SIMD4 vectors
+        var simdVectors: [simd_uint4] = []
+        for i in stride(from: 0, to: paddedNumbers.count, by: 4) {
+            let vector = simd_uint4(paddedNumbers[i], paddedNumbers[i+1], paddedNumbers[i+2], paddedNumbers[i+3])
+            simdVectors.append(vector)
+        }
+        
+        let maxSteps: UInt32 = 100000
+        
+        // Create buffers
+        guard let inputBuffer = device.makeBuffer(bytes: simdVectors, length: simdVectors.count * MemoryLayout<simd_uint4>.size, options: []),
+              let outputBuffer = device.makeBuffer(length: paddedNumbers.count * MemoryLayout<InfiniteCollatzResult>.size, options: []),
+              let statsBuffer = device.makeBuffer(length: 4 * MemoryLayout<UInt32>.size, options: []),
+              let maxStepsBuffer = device.makeBuffer(bytes: [maxSteps], length: MemoryLayout<UInt32>.size, options: []) else {
+            return []
+        }
+        
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            return []
+        }
+        
+        computeEncoder.setComputePipelineState(vectorizedPipelineState)
+        computeEncoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        computeEncoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        computeEncoder.setBuffer(statsBuffer, offset: 0, index: 2)
+        computeEncoder.setBuffer(maxStepsBuffer, offset: 0, index: 3)
+        
+        let threadsPerThreadgroup = MTLSize(width: min(simdVectors.count, vectorizedPipelineState.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        let numThreadgroups = MTLSize(width: (simdVectors.count + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width, height: 1, depth: 1)
+        
+        computeEncoder.dispatchThreadgroups(numThreadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+        computeEncoder.endEncoding()
+        
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        // Read results
+        let resultPointer = outputBuffer.contents().bindMemory(to: InfiniteCollatzResult.self, capacity: paddedNumbers.count)
+        let allResults = Array(UnsafeBufferPointer(start: resultPointer, count: paddedNumbers.count))
+        
+        // Return only original count (remove padding)
+        return Array(allResults.prefix(numbers.count))
+    }
+    
+    private func processSequential(_ numbers: [UInt32]) -> [InfiniteCollatzResult] {
+        return numbers.map { number in
+            var current = number
+            var steps: UInt32 = 0
+            var maxValue = number
+            
+            while current != 1 && steps < 100000 {
+                if current % 2 == 0 {
+                    current = current / 2
+                } else {
+                    current = current * 3 + 1
+                }
+                steps += 1
+                maxValue = max(maxValue, current)
+                
+                if current > 1000000000 { break }
+            }
+            
+            return InfiniteCollatzResult(
+                steps: steps,
+                maxValue: maxValue,
+                originalNumber: number,
+                convergencePattern: 0
+            )
+        }
+    }
+    
+    private func updateRecords(_ results: [InfiniteCollatzResult]) {
         recordLock.lock()
         defer { recordLock.unlock() }
         
         for result in results {
+            // Print current number and steps for interesting results
+            if result.steps > 50 || result.maxValue > result.originalNumber * 100 {
+                print("📊 Number: \(result.originalNumber) → \(result.steps) steps (peak: \(result.maxValue))")
+            }
+            
             if result.steps > mostStepsRecord.steps {
                 mostStepsRecord = (number: result.originalNumber, steps: result.steps)
-                let currentTime = CFAbsoluteTimeGetCurrent()
-                let elapsed = currentTime - startTime
-                let rate = Double(totalProcessed) / elapsed
-                
                 print("🏆 NEW RECORD! Number: \(result.originalNumber) took \(result.steps) steps (max value: \(result.maxValue))")
+                
+                let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+                let rate = Double(totalProcessed) / elapsed
                 print("   Processed \(totalProcessed) numbers in \(String(format: "%.1f", elapsed))s (avg \(String(format: "%.0f", rate))/sec)")
             }
         }
     }
     
-    func generateNextBatch(currentRange: Range<UInt32>, batchSize: Int, results: [InfiniteCollatzResult]) -> [UInt32] {
+    func printPerformanceStats() {
+        let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+        let totalRate = Double(totalProcessed) / elapsed
+        
+        print("\n📊 Performance Statistics:")
+        print("   Total processed: \(totalProcessed) numbers in \(String(format: "%.1f", elapsed))s")
+        print("   Overall rate: \(String(format: "%.0f", totalRate)) numbers/sec")
+        print("   Current record: \(mostStepsRecord.number) with \(mostStepsRecord.steps) steps")
+        
+        if metalPerformance.totalNumbers > 0 {
+            let metalRate = Double(metalPerformance.totalNumbers) / metalPerformance.totalTime
+            print("   Metal GPU: \(metalPerformance.totalNumbers) numbers, \(String(format: "%.0f", metalRate)) numbers/sec")
+        }
+        
+        if gcdPerformance.totalNumbers > 0 {
+            let gcdRate = Double(gcdPerformance.totalNumbers) / gcdPerformance.totalTime
+            print("   GCD+SIMD: \(gcdPerformance.totalNumbers) numbers, \(String(format: "%.0f", gcdRate)) numbers/sec")
+        }
+        
+        if simdPerformance.totalNumbers > 0 {
+            let simdRate = Double(simdPerformance.totalNumbers) / simdPerformance.totalTime
+            print("   SIMD: \(simdPerformance.totalNumbers) numbers, \(String(format: "%.0f", simdRate)) numbers/sec")
+        }
+    }
+    
+    func startInfiniteExploration() {
+        var currentStart: UInt32 = 1
+        let initialBatchSize = 5000
+        var adaptiveBatchSize = initialBatchSize
+        
+        print("🚀 Starting Hybrid GPU+GCD+SIMD Infinite Collatz Exploration...")
+        print("🎯 Intelligently choosing optimal processing method per batch")
+        print("⚡ Metal GPU + Grand Central Dispatch + SIMD Vectorization")
+        print("Press Ctrl+C to stop\n")
+        
+        // Performance monitoring
+        var lastStatsTime = CFAbsoluteTimeGetCurrent()
+        var lastDisplayTime = CFAbsoluteTimeGetCurrent()
+        
+        while true {
+            let currentRange = currentStart..<(currentStart + UInt32(adaptiveBatchSize))
+            let numbers = Array(currentRange)
+            
+            let results = processNumbers(numbers)
+            
+            // Print progress every 25k numbers with current range info
+            if totalProcessed % 25000 == 0 {
+                let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+                let rate = Double(totalProcessed) / elapsed
+                print("📊 Progress: \(totalProcessed) numbers processed in \(String(format: "%.1f", elapsed))s")
+                print("   Overall rate: \(String(format: "%.0f", rate)) numbers/sec")
+                print("   Current record: \(mostStepsRecord.number) with \(mostStepsRecord.steps) steps")
+                print("   Currently exploring: \(currentRange.lowerBound) to \(currentRange.upperBound)")
+                print("   Batch size: \(adaptiveBatchSize) (adaptive)")
+            }
+            
+            // Print real-time processing updates every 2 seconds
+            let currentTime = CFAbsoluteTimeGetCurrent()
+            if currentTime - lastDisplayTime > 2.0 {
+                let currentNumber = currentRange.upperBound - 1
+                let elapsed = currentTime - startTime
+                let rate = Double(totalProcessed) / elapsed
+                print("🔍 Currently at number \(currentNumber) | Rate: \(String(format: "%.0f", rate))/sec | Record: \(mostStepsRecord.number) (\(mostStepsRecord.steps) steps)")
+                lastDisplayTime = currentTime
+            }
+            
+            // Print detailed performance stats every 5 minutes
+            if currentTime - lastStatsTime > 300 {
+                printPerformanceStats()
+                lastStatsTime = currentTime
+            }
+            
+            // Adaptive strategy generation based on results
+            let nextBatch = generateAdaptiveBatch(currentRange: currentRange, batchSize: adaptiveBatchSize, results: results)
+            currentStart = nextBatch.first ?? (currentRange.upperBound + 1)
+            
+            // Dynamic batch sizing optimization
+            let avgSteps = results.map { Double($0.steps) }.reduce(0, +) / Double(results.count)
+            
+            if avgSteps > 50 && adaptiveBatchSize < 8192 {
+                adaptiveBatchSize = min(adaptiveBatchSize + 512, 8192) // Increase for interesting regions
+            } else if avgSteps < 20 && adaptiveBatchSize > 1000 {
+                adaptiveBatchSize = max(adaptiveBatchSize - 256, 1000) // Decrease for boring regions
+            }
+        }
+    }
+    
+    private func generateAdaptiveBatch(currentRange: Range<UInt32>, batchSize: Int, results: [InfiniteCollatzResult]) -> [UInt32] {
         var nextNumbers: [UInt32] = []
         
-        // Strategy 1: Continue sequential exploration
+        // Strategy 1: Sequential exploration (40% of batch)
+        let sequentialCount = batchSize * 40 / 100
         let sequentialStart = currentRange.upperBound
-        let sequentialEnd = sequentialStart + UInt32(batchSize / 2)
-        nextNumbers.append(contentsOf: sequentialStart..<sequentialEnd)
+        nextNumbers.append(contentsOf: sequentialStart..<(sequentialStart + UInt32(sequentialCount)))
         
-        // Strategy 2: Explore around interesting numbers (high step counts)
-        let interestingResults = results.filter { $0.steps > 50 }.sorted { $0.steps > $1.steps }.prefix(batchSize / 4)
+        // Strategy 2: Explore around high-step numbers (30% of batch)
+        let interestingCount = batchSize * 30 / 100
+        let interestingResults = results.filter { $0.steps > 75 }.sorted { $0.steps > $1.steps }.prefix(interestingCount / 4)
         for result in interestingResults {
             let base = result.originalNumber
             let variations = [
-                base * 2, base * 3, base + UInt32.random(in: 1...100),
-                base - min(base / 2, UInt32.random(in: 1...50))
+                base * 2, base * 3, base + UInt32.random(in: 1...200),
+                base - min(base / 2, UInt32.random(in: 1...100))
             ]
-            nextNumbers.append(contentsOf: variations.prefix(2))
+            nextNumbers.append(contentsOf: variations.prefix(4))
         }
         
-        // Strategy 3: Random exploration in higher ranges
-        let remainingSlots = batchSize - nextNumbers.count
-        let randomBase = sequentialEnd + UInt32.random(in: 0...10000)
-        for i in 0..<remainingSlots {
+        // Strategy 3: Power-of-2 related numbers (15% of batch)
+        let powerCount = batchSize * 15 / 100
+        let powerBase = currentRange.upperBound
+        for i in 0..<powerCount {
+            let power = UInt32(1 << (i % 20)) // Powers of 2 up to 2^20
+            nextNumbers.append(powerBase + power + UInt32(i))
+        }
+        
+        // Strategy 4: Random high-range exploration (15% of batch)
+        let randomCount = batchSize - nextNumbers.count
+        let randomBase = currentRange.upperBound + UInt32.random(in: 10000...100000)
+        for i in 0..<randomCount {
             nextNumbers.append(randomBase + UInt32(i))
         }
         
         return Array(nextNumbers.prefix(batchSize))
     }
     
-    func startInfiniteExploration() {
-        var currentStart: UInt32 = 1
-        let initialBatchSize = 2048
-        var adaptiveBatchSize = initialBatchSize
-        
-        print("🚀 Starting GPU-accelerated infinite Collatz exploration...")
-        print("🎯 Searching for numbers with the most steps to reach 1")
-        print("⚡ Using GPU parallel processing with adaptive batch sizing")
-        print("Press Ctrl+C to stop\n")
-        
-        while true {
-            let currentRange = currentStart..<(currentStart + UInt32(adaptiveBatchSize))
-            let numbers = Array(currentRange)
-            
-            let results = exploreCollatzBatch(numbers: numbers)
-            checkForRecords(results)
-            
-            totalProcessed += UInt64(adaptiveBatchSize)
-            
-            // Print progress every 100k numbers
-            if totalProcessed % 100000 == 0 {
-                let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-                let rate = Double(totalProcessed) / elapsed
-                print("📊 Progress: \(totalProcessed) numbers processed in \(String(format: "%.1f", elapsed))s (avg \(String(format: "%.0f", rate))/sec)")
-                print("   Current record: \(mostStepsRecord.number) with \(mostStepsRecord.steps) steps")
-                print("   Exploring range: \(currentRange.lowerBound) - \(currentRange.upperBound)")
-            }
-            
-            // Generate next batch using adaptive strategy
-            let nextBatch = generateNextBatch(currentRange: currentRange, batchSize: adaptiveBatchSize, results: results)
-            currentStart = nextBatch.first ?? (currentRange.upperBound + 1)
-            
-            // Adaptive batch sizing based on performance
-            let highStepResults = results.filter { $0.steps > 100 }
-            if !highStepResults.isEmpty && adaptiveBatchSize < 4096 {
-                adaptiveBatchSize = min(adaptiveBatchSize + 256, 4096) // Increase batch size when finding interesting numbers
-            } else if highStepResults.isEmpty && adaptiveBatchSize > 512 {
-                adaptiveBatchSize = max(adaptiveBatchSize - 128, 512) // Decrease batch size when not finding much
-            }
-        }
+    private var maxConcurrentOperations: Int {
+        return gcdProcessor.maxConcurrentOperations
     }
 }
 
-// Fallback CPU implementation for infinite exploration
+// Fallback CPU implementation using GCD and SIMD
 class CPUInfiniteCollatzExplorer {
+    private let gcdProcessor: GCDCollatzProcessor
     private var mostStepsRecord: (number: UInt32, steps: UInt32) = (0, 0)
     private let recordLock = NSLock()
     private var totalProcessed: UInt64 = 0
     private let startTime = CFAbsoluteTimeGetCurrent()
     
-    func collatzSteps(n: UInt32) -> (steps: UInt32, maxValue: UInt32) {
-        var current = n
-        var steps: UInt32 = 0
-        var maxValue = n
-        
-        while current != 1 && steps < 100000 {
-            if current % 2 == 0 {
-                current = current / 2
-            } else {
-                current = current * 3 + 1
-            }
-            steps += 1
-            maxValue = max(maxValue, current)
-            
-            if current > 1000000000 { break }
-        }
-        
-        return (steps: steps, maxValue: maxValue)
+    init() {
+        self.gcdProcessor = GCDCollatzProcessor()
     }
     
     func startInfiniteExploration() {
-        print("🚀 Starting CPU-based infinite Collatz exploration...")
+        print("🚀 Starting CPU-based infinite Collatz exploration with GCD + SIMD...")
         print("🎯 Searching for numbers with the most steps to reach 1")
-        print("🧵 Using multi-threaded CPU processing")
+        print("🧵 Using multi-threaded CPU processing with SIMD vectorization")
         print("Press Ctrl+C to stop\n")
         
-        let queue = DispatchQueue.global(qos: .userInteractive)
-        let semaphore = DispatchSemaphore(value: 100) // Limit concurrent threads
+        var currentStart: UInt32 = 1
+        let batchSize = 1000
         
-        var i: UInt32 = 1
         while true {
+            let numbers = Array(currentStart..<(currentStart + UInt32(batchSize)))
+            let semaphore = DispatchSemaphore(value: 0)
+            
+             gcdProcessor.processNumbers(numbers) { [weak self] results in
+                 // Show current numbers being processed
+                 let range = "\(numbers.first ?? 0)-\(numbers.last ?? 0)"
+                 print("🧵 Processed batch \(range) with GCD+SIMD")
+                 
+                 // Show interesting results
+                 let interestingResults = results.filter { $0.steps > 30 }
+                 for result in interestingResults.prefix(3) {
+                     print("   → \(result.originalNumber): \(result.steps) steps (peak: \(result.maxValue))")
+                 }
+                 
+                 self?.updateRecords(results)
+                 self?.totalProcessed += UInt64(results.count)
+                 
+                 if self?.totalProcessed ?? 0 % 10000 == 0 {
+                     let elapsed = CFAbsoluteTimeGetCurrent() - (self?.startTime ?? 0)
+                     let rate = Double(self?.totalProcessed ?? 0) / elapsed
+                     print("📊 Progress: \(self?.totalProcessed ?? 0) numbers processed, current record: \(self?.mostStepsRecord.number ?? 0) (\(self?.mostStepsRecord.steps ?? 0) steps)")
+                     print("   Rate: \(String(format: "%.0f", rate)) numbers/sec")
+                     print("   Currently at number: \(numbers.last ?? 0)")
+                 }
+                 
+                 semaphore.signal()
+             }
+            
             semaphore.wait()
-            queue.async { [self] in
-                defer { semaphore.signal() }
-                
-                let result = collatzSteps(n: i)
-                
-                recordLock.lock()
-                if result.steps > mostStepsRecord.steps {
-                    mostStepsRecord = (number: i, steps: result.steps)
-                    let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-                    let rate = Double(totalProcessed) / elapsed
-                    print("🏆 NEW RECORD! Number: \(i) took \(result.steps) steps (max value: \(result.maxValue))")
-                    print("   Processed \(totalProcessed) numbers in \(String(format: "%.1f", elapsed))s (avg \(String(format: "%.0f", rate))/sec)")
-                }
-                
-                totalProcessed += 1
-                
-                if totalProcessed % 10000 == 0 {
-                    let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-                    let rate = Double(totalProcessed) / elapsed
-                    print("📊 Progress: \(totalProcessed) numbers processed, current record: \(mostStepsRecord.number) (\(mostStepsRecord.steps) steps)")
-                }
-                recordLock.unlock()
+            currentStart += UInt32(batchSize)
+        }
+    }
+    
+    private func updateRecords(_ results: [InfiniteCollatzResult]) {
+        recordLock.lock()
+        defer { recordLock.unlock() }
+        
+        for result in results {
+            if result.steps > mostStepsRecord.steps {
+                mostStepsRecord = (number: result.originalNumber, steps: result.steps)
+                let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+                let rate = Double(totalProcessed) / elapsed
+                print("🏆 NEW RECORD! Number: \(result.originalNumber) took \(result.steps) steps (max value: \(result.maxValue))")
+                print("   Processed \(totalProcessed) numbers in \(String(format: "%.1f", elapsed))s (avg \(String(format: "%.0f", rate))/sec)")
             }
-            i += 1
         }
     }
 }
 
 // Main execution
-if let gpuExplorer = GPUInfiniteCollatzExplorer() {
-    gpuExplorer.startInfiniteExploration()
+print("🔍 Detecting optimal processing configuration...")
+
+if let hybridExplorer = HybridInfiniteCollatzExplorer() {
+    hybridExplorer.startInfiniteExploration()
 } else {
-    print("GPU not available, falling back to CPU exploration...")
+    print("GPU not available, falling back to CPU exploration with GCD + SIMD...")
     let cpuExplorer = CPUInfiniteCollatzExplorer()
     cpuExplorer.startInfiniteExploration()
 }
