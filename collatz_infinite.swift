@@ -102,6 +102,17 @@ kernel void vectorizedCollatzCompute(device const ulong4* inputVectors [[buffer(
         ulong steps = 0;
         ulong maxValue = n;
         
+        // Early exit for known small values
+        if (n <= 1) {
+            uint resultIndex = index * 4 + i;
+            results[resultIndex].steps = 0;
+            results[resultIndex].maxValue = n;
+            results[resultIndex].originalNumber = n;
+            results[resultIndex].convergencePattern = 0;
+            atomic_fetch_add_explicit(&globalStats[0], 1, memory_order_relaxed);
+            continue;
+        }
+        
         while (current != 1 && steps < maxSteps) {
             if (current % 2 == 0) {
                 current = current >> 1;
@@ -387,9 +398,9 @@ class HybridInfiniteCollatzExplorer {
             results = processSequential(numbers)
         }
         
-        // Update records
-        updateRecords(results)
+        // Update counters first, then records
         totalProcessed += UInt64(count)
+        updateRecords(results)
         
         let totalTime = CFAbsoluteTimeGetCurrent() - startTime
         let rate = Double(count) / totalTime
@@ -665,7 +676,7 @@ class HybridInfiniteCollatzExplorer {
             let base = result.originalNumber
             let variations = [
                 base * 2, base * 3, base + UInt64.random(in: 1...200),
-                base - min(base / 2, UInt64.random(in: 1...100))
+                max(1, base - min(base / 2, UInt64.random(in: 1...100)))
             ]
             nextNumbers.append(contentsOf: variations.prefix(4))
         }
