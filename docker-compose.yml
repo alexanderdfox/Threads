@@ -1,0 +1,151 @@
+version: '3.8'
+
+services:
+  # Cluster Coordinator - Manages work distribution
+  coordinator:
+    build: .
+    container_name: threads-coordinator
+    ports:
+      - "3000:3000"
+      - "9090:9090"
+    environment:
+      - NODE_TYPE=coordinator
+      - CLUSTER_SIZE=3
+      - GPU_ENABLED=true
+    volumes:
+      - ./cluster-data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - threads-cluster
+    restart: unless-stopped
+
+  # Worker Node 1 - GPU Processing
+  worker-1:
+    build: .
+    container_name: threads-worker-1
+    ports:
+      - "8081:80"
+      - "8091:8080"
+    environment:
+      - NODE_TYPE=worker
+      - NODE_ID=1
+      - COORDINATOR_URL=http://coordinator:3000
+      - GPU_ENABLED=true
+      - WORKER_THREADS=4
+    volumes:
+      - ./cluster-data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - threads-cluster
+    depends_on:
+      - coordinator
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Worker Node 2 - CPU Processing
+  worker-2:
+    build: .
+    container_name: threads-worker-2
+    ports:
+      - "8082:80"
+      - "8092:8080"
+    environment:
+      - NODE_TYPE=worker
+      - NODE_ID=2
+      - COORDINATOR_URL=http://coordinator:3000
+      - GPU_ENABLED=false
+      - WORKER_THREADS=8
+    volumes:
+      - ./cluster-data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - threads-cluster
+    depends_on:
+      - coordinator
+    restart: unless-stopped
+
+  # Worker Node 3 - Hybrid Processing
+  worker-3:
+    build: .
+    container_name: threads-worker-3
+    ports:
+      - "8083:80"
+      - "8093:8080"
+    environment:
+      - NODE_TYPE=worker
+      - NODE_ID=3
+      - COORDINATOR_URL=http://coordinator:3000
+      - GPU_ENABLED=auto
+      - WORKER_THREADS=6
+    volumes:
+      - ./cluster-data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - threads-cluster
+    depends_on:
+      - coordinator
+    restart: unless-stopped
+
+  # Load Balancer - Routes requests to available workers
+  load-balancer:
+    image: nginx:alpine
+    container_name: threads-lb
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx-lb.conf:/etc/nginx/nginx.conf
+      - ./ssl:/etc/nginx/ssl
+    networks:
+      - threads-cluster
+    depends_on:
+      - worker-1
+      - worker-2
+      - worker-3
+    restart: unless-stopped
+
+  # Monitoring - Cluster performance monitoring
+  monitoring:
+    image: prom/prometheus:latest
+    container_name: threads-monitoring
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring-data:/prometheus
+    networks:
+      - threads-cluster
+    restart: unless-stopped
+
+  # Dashboard - Cluster management interface
+  dashboard:
+    image: grafana/grafana:latest
+    container_name: threads-dashboard
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+    volumes:
+      - ./grafana-data:/var/lib/grafana
+      - ./grafana-config:/etc/grafana/provisioning
+    networks:
+      - threads-cluster
+    restart: unless-stopped
+
+networks:
+  threads-cluster:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  cluster-data:
+  monitoring-data:
+  grafana-data:

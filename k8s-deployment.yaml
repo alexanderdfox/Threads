@@ -1,0 +1,525 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: threads-cluster
+  labels:
+    name: threads-cluster
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-config
+  namespace: threads-cluster
+data:
+  cluster-size: "5"
+  gpu-enabled: "true"
+  coordinator-port: "3000"
+  metrics-port: "9090"
+  worker-threads: "4"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cluster-secrets
+  namespace: threads-cluster
+type: Opaque
+data:
+  # Add any sensitive configuration here
+  admin-password: YWRtaW4xMjM=  # admin123 in base64
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator-service
+  namespace: threads-cluster
+  labels:
+    app: coordinator
+spec:
+  selector:
+    app: coordinator
+  ports:
+  - name: http
+    port: 3000
+    targetPort: 3000
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: load-balancer-service
+  namespace: threads-cluster
+  labels:
+    app: load-balancer
+spec:
+  selector:
+    app: load-balancer
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    nodePort: 30080
+  - name: https
+    port: 443
+    targetPort: 443
+    nodePort: 30443
+  type: NodePort
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coordinator
+  namespace: threads-cluster
+  labels:
+    app: coordinator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coordinator
+  template:
+    metadata:
+      labels:
+        app: coordinator
+    spec:
+      containers:
+      - name: coordinator
+        image: threads-cluster:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 3000
+        - containerPort: 9090
+        env:
+        - name: NODE_TYPE
+          value: "coordinator"
+        - name: CLUSTER_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: cluster-config
+              key: cluster-size
+        - name: GPU_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: cluster-config
+              key: gpu-enabled
+        - name: COORDINATOR_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: cluster-config
+              key: coordinator-port
+        - name: METRICS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: cluster-config
+              key: metrics-port
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: cluster-data
+          mountPath: /app/data
+        - name: logs
+          mountPath: /app/logs
+      volumes:
+      - name: cluster-data
+        persistentVolumeClaim:
+          claimName: cluster-data-pvc
+      - name: logs
+        persistentVolumeClaim:
+          claimName: logs-pvc
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-workers
+  namespace: threads-cluster
+  labels:
+    app: gpu-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gpu-worker
+  template:
+    metadata:
+      labels:
+        app: gpu-worker
+        worker-type: gpu
+    spec:
+      containers:
+      - name: gpu-worker
+        image: threads-cluster:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 80
+        - containerPort: 8080
+        env:
+        - name: NODE_TYPE
+          value: "worker"
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: COORDINATOR_URL
+          value: "http://coordinator-service:3000"
+        - name: GPU_ENABLED
+          value: "true"
+        - name: WORKER_THREADS
+          valueFrom:
+            configMapKeyRef:
+              name: cluster-config
+              key: worker-threads
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "1000m"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "4Gi"
+            cpu: "4000m"
+            nvidia.com/gpu: 1
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: cluster-data
+          mountPath: /app/data
+        - name: logs
+          mountPath: /app/logs
+      volumes:
+      - name: cluster-data
+        persistentVolumeClaim:
+          claimName: cluster-data-pvc
+      - name: logs
+        persistentVolumeClaim:
+          claimName: logs-pvc
+      nodeSelector:
+        accelerator: nvidia-tesla-k80  # Adjust based on your GPU nodes
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cpu-workers
+  namespace: threads-cluster
+  labels:
+    app: cpu-worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cpu-worker
+  template:
+    metadata:
+      labels:
+        app: cpu-worker
+        worker-type: cpu
+    spec:
+      containers:
+      - name: cpu-worker
+        image: threads-cluster:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 80
+        - containerPort: 8080
+        env:
+        - name: NODE_TYPE
+          value: "worker"
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: COORDINATOR_URL
+          value: "http://coordinator-service:3000"
+        - name: GPU_ENABLED
+          value: "false"
+        - name: WORKER_THREADS
+          value: "8"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "1000m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: cluster-data
+          mountPath: /app/data
+        - name: logs
+          mountPath: /app/logs
+      volumes:
+      - name: cluster-data
+        persistentVolumeClaim:
+          claimName: cluster-data-pvc
+      - name: logs
+        persistentVolumeClaim:
+          claimName: logs-pvc
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-balancer
+  namespace: threads-cluster
+  labels:
+    app: load-balancer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: load-balancer
+  template:
+    metadata:
+      labels:
+        app: load-balancer
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        - containerPort: 443
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        - name: ssl-certs
+          mountPath: /etc/nginx/ssl
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-lb-config
+      - name: ssl-certs
+        secret:
+          secretName: ssl-certificates
+          optional: true
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cluster-data-pvc
+  namespace: threads-cluster
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logs-pvc
+  namespace: threads-cluster
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-lb-config
+  namespace: threads-cluster
+data:
+  nginx.conf: |
+    events {
+        worker_connections 2048;
+    }
+    
+    http {
+        upstream gpu_workers {
+            server gpu-workers:80 weight=5;
+        }
+        
+        upstream cpu_workers {
+            server cpu-workers:80 weight=3;
+        }
+        
+        upstream all_workers {
+            server gpu-workers:80 weight=3;
+            server cpu-workers:80 weight=2;
+        }
+        
+        server {
+            listen 80;
+            
+            location /gpu/ {
+                proxy_pass http://gpu_workers;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            
+            location /cpu/ {
+                proxy_pass http://cpu_workers;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            
+            location / {
+                proxy_pass http://all_workers;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            
+            location /health {
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+        }
+    }
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cpu-workers-hpa
+  namespace: threads-cluster
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cpu-workers
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gpu-workers-hpa
+  namespace: threads-cluster
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gpu-workers
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 70
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cluster-network-policy
+  namespace: threads-cluster
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: threads-cluster
+    - podSelector: {}
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: threads-cluster
+    - podSelector: {}
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
